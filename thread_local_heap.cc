@@ -44,16 +44,12 @@ class PrivateHeap {
   void* alloc(size_t bytes) {
     void* ptr;
     if(is_not_process_heap_) [[likely]] {
-      void* ptr = HeapAlloc(heap_handle_, HEAP_NO_SERIALIZE, bytes);
+      ptr = HeapAlloc(heap_handle_, HEAP_NO_SERIALIZE, bytes);
       if(ptr != NULL) [[likely]] {
         allocation_count_++;
       }
     } else [[unlikely]] {
-      HANDLE handle = heap_handle_;
-      if(handle == NULL) [[unlikely]] {
-        handle = GetProcessHeap();
-      }
-      void* ptr = HeapAlloc(handle, 0, bytes);
+      ptr = HeapAlloc(heap_handle_, 0, bytes);
     }
     return ptr;
   }
@@ -155,7 +151,7 @@ class ThreadLocalHeap {
   PrivateHeap* private_heap_;
 
   // Whether the associated PrivateHeap has been consructed.
-  bool ready_ = false;
+  bool ready_;
 };
 
 // Each thread allocates a separate instance of thread_local_heap_.
