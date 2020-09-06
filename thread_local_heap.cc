@@ -22,11 +22,16 @@ class PrivateHeap {
  public:
   // Allocates a new Windows heap. The heap does not specify HEAP_NO_SERIALIZE since memory
   // allocated by one thread might be freed by another.
-  PrivateHeap()
+  PrivateHeap(bool use_process_heap = false)
       : allocation_count_(0),
         heap_handle_(NULL),
-        marked_for_destruction_(false) {
-    heap_handle_ = HeapCreate(0, 0, 0);
+        marked_for_destruction_(false),
+        use_process_heap_(use_process_heap) {
+    if(use_process_heap) {
+      heap_handle_ = GetProcessHeap();
+    } else {
+      heap_handle_ = HeapCreate(0, 0, 0);
+    }
   }
 
   // Destroys the allocated Windows heap.
@@ -49,7 +54,7 @@ class PrivateHeap {
     bool success = HeapFree(heap_handle_, 0, ptr);
     if (success) [[likely]] {
       allocation_count_--;
-      if(marked_for_destruction_ && empty()) [[unlikely]] {
+      if(marked_for_destruction_ && !use_process_heap_ && empty()) [[unlikely]] {
         delete this;
       }
     }
@@ -61,7 +66,7 @@ class PrivateHeap {
 
   // Destroys the heap or marks it to be destroyed as soon as all allocations have been freed.
   void mark_for_destruction() { 
-    if(empty()) {
+    if(empty() && !use_process_heap_) {
       delete this;
     } else {
       marked_for_destruction_ = true;
@@ -77,7 +82,13 @@ class PrivateHeap {
 
   // If true, the heap will destroyed as soon as all allocations have been freed.
   bool marked_for_destruction_;
+
+  // Whether this PrivateHeap wraps the process heap, in which case it should never be destroyed.
+  bool use_process_heap_;
 };
+
+// The PrivateHeap wrapping the shared process heap.
+PrivateHeap process_private_heap_(true);
 
 // Returns the number of bytes to allocate to store the pointer from which to free the memory.
 constexpr size_t heap_ptr_ofst() {
@@ -91,6 +102,7 @@ class ThreadLocalHeap {
   // Creates a corresponding PrivateHeap which wraps a Windows heap.
   ThreadLocalHeap() {
     private_heap_ = new PrivateHeap();
+    ready_ = true;
   }
 
   // Marks the corresponding PrivateHeap for destruction, which will cause it to destroy
@@ -102,9 +114,15 @@ class ThreadLocalHeap {
   // Allocates |count| bytes from the corresponding PrivateHeap.
   void* alloc(size_t count) {
     size_t overalloc = count + heap_ptr_ofst();
-    void* ptr = private_heap_->alloc(overalloc);
+    PrivateHeap* private_heap;
+    if(ready_) [[likely]] {
+      private_heap = private_heap_;
+    } else [[unlikely]] {
+      private_heap = &process_private_heap_;
+    }
+    void* ptr = private_heap->alloc(overalloc);
     if(ptr) [[likely]] {
-      *((PrivateHeap**)ptr) = private_heap_;
+      *((PrivateHeap**)ptr) = private_heap;
       return (void*)(((char*)ptr) + heap_ptr_ofst());
     }
     return ptr;
@@ -125,6 +143,9 @@ class ThreadLocalHeap {
  private:
   // The associated PrivateHeap.
   PrivateHeap* private_heap_;
+
+  // Whether the associated PrivateHeap has been consructed.
+  bool ready_ = false;
 };
 
 // Each thread allocates a separate instance of thread_local_heap_.
