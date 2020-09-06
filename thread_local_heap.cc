@@ -40,8 +40,8 @@ class PrivateHeap {
   }
 
   // Allocate bytes from the wrapped Windows heap.
-  void* alloc(size_t bytes) {
-    void* ptr = HeapAlloc(heap_handle_, 0, bytes);
+  void* alloc(size_t bytes, DWORD dw_flags) {
+    void* ptr = HeapAlloc(heap_handle_, dw_flags, bytes);
     if(ptr != NULL) [[likely]] {
       allocation_count_++;
     }
@@ -115,12 +115,15 @@ class ThreadLocalHeap {
   void* alloc(size_t count) {
     size_t overalloc = count + heap_ptr_ofst();
     PrivateHeap* private_heap;
+    DWORD dw_flags;
     if(ready_) [[likely]] {
       private_heap = private_heap_;
+      dw_flags = HEAP_NO_SERIALIZE;
     } else [[unlikely]] {
       private_heap = &process_private_heap_;
+      dw_flags = 0;
     }
-    void* ptr = private_heap->alloc(overalloc);
+    void* ptr = private_heap->alloc(overalloc, dw_flags);
     if(ptr) [[likely]] {
       *((PrivateHeap**)ptr) = private_heap;
       return (void*)(((char*)ptr) + heap_ptr_ofst());
