@@ -37,7 +37,7 @@ void DestroyPrivateHeap(PrivateHeap* private_heap) {
   std::free(private_heap);
 }
 
-// ThreadLocalHeap stores is alocated once for each thread and stores the pointer to the associated
+// ThreadLocalHeap is allocated once for each thread and stores the pointer to the associated
 // private heap.
 struct ThreadLocalHeap {
   ~ThreadLocalHeap() {
