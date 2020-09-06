@@ -19,83 +19,11 @@ namespace {
 
 // The lifetime of PrivateHeap starts when the owning ThreadLocalHeap's lifetime starts. It ends,
 // when the owning ThreadLocalHeap lifetime has ended AND the contained heap is empty.
-class PrivateHeap {
- public:
-  // Allocates a new Windows heap. The heap does not specify HEAP_NO_SERIALIZE since memory
-  // allocated by one thread might be freed by another.
-  PrivateHeap(bool is_not_process_heap = true)
-      : allocation_count_(0),
-        heap_handle_(NULL),
-        marked_for_destruction_(false),
-        is_not_process_heap_(is_not_process_heap) {
-    if(is_not_process_heap) {
-      heap_handle_ = HeapCreate(0, 0, 0);
-    } else {
-      heap_handle_ = GetProcessHeap();
-    }
-  }
-
-  // Destroys the allocated Windows heap.
-  ~PrivateHeap() {
-    if(is_not_process_heap_)
-      bool success = HeapDestroy(heap_handle_);
-  }
-
-  // Allocate bytes from the wrapped Windows heap.
-  void* alloc(size_t bytes) {
-    void* ptr;
-    if(is_not_process_heap_) [[likely]] {
-      ptr = HeapAlloc(heap_handle_, HEAP_NO_SERIALIZE, bytes);
-      if(ptr != NULL) [[likely]] {
-        allocation_count_++;
-      }
-    } else [[unlikely]] {
-      ptr = HeapAlloc(heap_handle_, 0, bytes);
-    }
-    return ptr;
-  }
-
-  // Free memory from the wrapped wWindows heap. Ptr must point to memory that has previously
-  // allocated from the wrapped heap.
-  bool free(void* ptr) {
-    bool success = HeapFree(heap_handle_, 0, ptr);
-    if (success && is_not_process_heap_) [[likely]] {
-      size_t new_count = --allocation_count_;
-      if(marked_for_destruction_ && new_count == 0) [[unlikely]] {
-        delete this;
-      }
-    }
-    return success;
-  }
-
-  // Returns whether there are currently no allocations in the heap.
-  bool empty() { return allocation_count_ == 0; }
-
-  // Destroys the heap or marks it to be destroyed as soon as all allocations have been freed.
-  void mark_for_destruction() { 
-    if(empty() && is_not_process_heap_) {
-      delete this;
-    } else {
-      marked_for_destruction_ = true;
-    }
-  }
-
- private:
-  // Number of allocations not yet freed.
-  std::atomic<size_t> allocation_count_;
-
-  // Handle to the wrapped Windows heap.
-  HANDLE heap_handle_;
-
-  // If true, the heap will destroyed as soon as all allocations have been freed.
-  bool marked_for_destruction_;
-
-  // Whether this PrivateHeap wraps a local heap that is not the process heap.
-  bool is_not_process_heap_;
+struct PrivateHeap {
+  HANDLE heap_handle;
+  std::atomic<size_t> allocation_count;
+  std::atomic<bool> marked_for_deletion;
 };
-
-// The PrivateHeap wrapping the shared process heap.
-PrivateHeap process_private_heap_(false);
 
 // Returns the number of bytes to allocate to store the pointer from which to free the memory.
 constexpr size_t heap_ptr_ofst() {
@@ -103,64 +31,62 @@ constexpr size_t heap_ptr_ofst() {
        ? sizeof(PrivateHeap*) : __STDCPP_DEFAULT_NEW_ALIGNMENT__;
 }
 
-// ThreadLocalHeap is created for each new thread and is destroyed when this thread ends.
-class ThreadLocalHeap {
- public:
-  // Creates a corresponding PrivateHeap which wraps a Windows heap.
-  ThreadLocalHeap() {
-    private_heap_ = new PrivateHeap();
-    ready_ = true;
-  }
+// Called when the associated thread has ended AND all memory from this heap has been freed.
+void DestroyPrivateHeap(PrivateHeap* private_heap) {
+  HeapDestroy(private_heap->heap_handle);
+  std::free(private_heap);
+}
 
-  // Marks the corresponding PrivateHeap for destruction, which will cause it to destroy
-  // the wrapped Windows heap as soon as all allocations in it have been freed.
+// ThreadLocalHeap stores is alocated once for each thread and stores the pointer to the associated
+// private heap.
+struct ThreadLocalHeap {
   ~ThreadLocalHeap() {
-    private_heap_->mark_for_destruction();
-  }
-
-  // Allocates |count| bytes from the corresponding PrivateHeap.
-  void* alloc(size_t count) {
-    size_t overalloc = count + heap_ptr_ofst();
-    PrivateHeap* private_heap;
-    if(ready_) [[likely]] {
-      private_heap = private_heap_;
-    } else [[unlikely]] {
-      private_heap = &process_private_heap_;
-    }
-    void* ptr = private_heap->alloc(overalloc);
-    if(ptr) [[likely]] {
-      *((PrivateHeap**)ptr) = private_heap;
-      return (void*)(((char*)ptr) + heap_ptr_ofst());
-    }
-    return ptr;
-  }
-
-  // Frees memory allocated from ANY ThreadLocalHeap.
-  static bool free(void* ptr) {
-    void* actual_ptr = (void*)(((char*)ptr) - heap_ptr_ofst());
-    PrivateHeap* heap = *((PrivateHeap**)actual_ptr);
-    if(heap) [[likely]] {
-      return heap->free(actual_ptr);
-    } else [[unlikely]] {
-      std::free(actual_ptr);
-      return true;
+    if(private_heap) {
+      private_heap->marked_for_deletion = private_heap->allocation_count == 0;
+      if(private_heap->marked_for_deletion) {
+        DestroyPrivateHeap(private_heap);
+      }
     }
   }
-
- private:
-  // The associated PrivateHeap.
-  PrivateHeap* private_heap_;
-
-  // Whether the associated PrivateHeap has been consructed.
-  bool ready_;
+  PrivateHeap* private_heap;
 };
 
-// Each thread allocates a separate instance of thread_local_heap_.
+// Each thread allocates a separate heap.
 thread_local ThreadLocalHeap thread_local_heap_;
+
+void* alloc_from_thread_local_heap(size_t count) {
+  if(thread_local_heap_.private_heap == NULL) [[unlikely]] {
+    thread_local_heap_.private_heap = static_cast<PrivateHeap*>(malloc(sizeof(PrivateHeap)));
+    thread_local_heap_.private_heap->heap_handle = HeapCreate(0, 0, 0);
+    thread_local_heap_.private_heap->allocation_count = 0;
+    thread_local_heap_.private_heap->marked_for_deletion = false;
+  }
+  size_t overalloc = count + heap_ptr_ofst();
+  void* ptr = HeapAlloc(thread_local_heap_.private_heap->heap_handle, 0, overalloc);
+  if(ptr) [[likely]] {
+    thread_local_heap_.private_heap->allocation_count++;
+    *static_cast<PrivateHeap**>(ptr) = thread_local_heap_.private_heap;
+    return static_cast<void*>(static_cast<char*>(ptr) + heap_ptr_ofst());
+  }
+  return ptr;
+}
+
+bool free_from_thread_local_heap(void* ptr) {
+  void* actual_ptr = static_cast<void*>(static_cast<char*>(ptr) - heap_ptr_ofst());
+  PrivateHeap* private_heap = *static_cast<PrivateHeap**>(actual_ptr);
+  bool success = HeapFree(private_heap->heap_handle, 0, actual_ptr);
+  if (success) [[likely]] {
+    size_t new_allocation_count = --private_heap->allocation_count;
+    if(new_allocation_count == 0 && private_heap->marked_for_deletion) [[unlikely]] {
+      DestroyPrivateHeap(private_heap);
+    }
+  }
+  return success;
+}
 
 // Implementation for operator new and operator new[]
 inline void* new_impl(std::size_t bytes) {
-  void* ptr = thread_local_heap_.alloc(bytes);
+  void* ptr = alloc_from_thread_local_heap(bytes);
   if (ptr) [[likely]] {
     return ptr;
   } else [[unlikely]] {
@@ -172,7 +98,7 @@ inline void* new_impl(std::size_t bytes) {
 inline void delete_impl(void* ptr) {
   if (!ptr)
     return;
-  ThreadLocalHeap::free(ptr);
+  free_from_thread_local_heap(ptr);
 }
 
 }  // anonymous namespace
