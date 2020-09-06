@@ -22,34 +22,38 @@ class PrivateHeap {
  public:
   // Allocates a new Windows heap. The heap does not specify HEAP_NO_SERIALIZE since memory
   // allocated by one thread might be freed by another.
-  PrivateHeap(bool use_process_heap = false)
+  PrivateHeap(bool is_not_process_heap = true)
       : allocation_count_(0),
         heap_handle_(NULL),
         marked_for_destruction_(false),
-        use_process_heap_(use_process_heap) {
-    if(use_process_heap) {
-      heap_handle_ = GetProcessHeap();
-    } else {
+        is_not_process_heap_(is_not_process_heap) {
+    if(is_not_process_heap) {
       heap_handle_ = HeapCreate(0, 0, 0);
+    } else {
+      heap_handle_ = GetProcessHeap();
     }
   }
 
   // Destroys the allocated Windows heap.
   ~PrivateHeap() {
-    if(!use_process_heap_)
+    if(is_not_process_heap_)
       bool success = HeapDestroy(heap_handle_);
   }
 
   // Allocate bytes from the wrapped Windows heap.
   void* alloc(size_t bytes) {
     void* ptr;
-    if(use_process_heap_) [[unlikely]] {
-      void* ptr = HeapAlloc(heap_handle_, 0, bytes);
-    } else [[likely]] {
+    if(is_not_process_heap_) [[likely]] {
       void* ptr = HeapAlloc(heap_handle_, HEAP_NO_SERIALIZE, bytes);
       if(ptr != NULL) [[likely]] {
         allocation_count_++;
       }
+    } else [[unlikely]] {
+      HANDLE handle = heap_handle_;
+      if(handle == NULL) [[unlikely]] {
+        handle = GetProcessHeap();
+      }
+      void* ptr = HeapAlloc(handle, 0, bytes);
     }
     return ptr;
   }
@@ -58,7 +62,7 @@ class PrivateHeap {
   // allocated from the wrapped heap.
   bool free(void* ptr) {
     bool success = HeapFree(heap_handle_, 0, ptr);
-    if (success && !use_process_heap_) [[likely]] {
+    if (success && is_not_process_heap_) [[likely]] {
       allocation_count_--;
       if(marked_for_destruction_ && empty()) [[unlikely]] {
         delete this;
@@ -72,7 +76,7 @@ class PrivateHeap {
 
   // Destroys the heap or marks it to be destroyed as soon as all allocations have been freed.
   void mark_for_destruction() { 
-    if(empty() && !use_process_heap_) {
+    if(empty() && is_not_process_heap_) {
       delete this;
     } else {
       marked_for_destruction_ = true;
@@ -89,12 +93,12 @@ class PrivateHeap {
   // If true, the heap will destroyed as soon as all allocations have been freed.
   bool marked_for_destruction_;
 
-  // Whether this PrivateHeap wraps the process heap, in which case it should never be destroyed.
-  bool use_process_heap_;
+  // Whether this PrivateHeap wraps a local heap that is not the process heap.
+  bool is_not_process_heap_;
 };
 
 // The PrivateHeap wrapping the shared process heap.
-PrivateHeap process_private_heap_(true);
+PrivateHeap process_private_heap_(false);
 
 // Returns the number of bytes to allocate to store the pointer from which to free the memory.
 constexpr size_t heap_ptr_ofst() {
