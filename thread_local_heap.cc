@@ -36,14 +36,20 @@ class PrivateHeap {
 
   // Destroys the allocated Windows heap.
   ~PrivateHeap() {
-    bool success = HeapDestroy(heap_handle_);
+    if(!use_process_heap_)
+      bool success = HeapDestroy(heap_handle_);
   }
 
   // Allocate bytes from the wrapped Windows heap.
-  void* alloc(size_t bytes, DWORD dw_flags) {
-    void* ptr = HeapAlloc(heap_handle_, dw_flags, bytes);
-    if(ptr != NULL) [[likely]] {
-      allocation_count_++;
+  void* alloc(size_t bytes) {
+    void* ptr;
+    if(use_process_heap_) [[unlikely]] {
+      void* ptr = HeapAlloc(heap_handle_, 0, bytes);
+    } else [[likely]] {
+      void* ptr = HeapAlloc(heap_handle_, HEAP_NO_SERIALIZE, bytes);
+      if(ptr != NULL) [[likely]] {
+        allocation_count_++;
+      }
     }
     return ptr;
   }
@@ -52,9 +58,9 @@ class PrivateHeap {
   // allocated from the wrapped heap.
   bool free(void* ptr) {
     bool success = HeapFree(heap_handle_, 0, ptr);
-    if (success) [[likely]] {
+    if (success && !use_process_heap_) [[likely]] {
       allocation_count_--;
-      if(marked_for_destruction_ && !use_process_heap_ && empty()) [[unlikely]] {
+      if(marked_for_destruction_ && empty()) [[unlikely]] {
         delete this;
       }
     }
@@ -115,15 +121,12 @@ class ThreadLocalHeap {
   void* alloc(size_t count) {
     size_t overalloc = count + heap_ptr_ofst();
     PrivateHeap* private_heap;
-    DWORD dw_flags;
     if(ready_) [[likely]] {
       private_heap = private_heap_;
-      dw_flags = HEAP_NO_SERIALIZE;
     } else [[unlikely]] {
       private_heap = &process_private_heap_;
-      dw_flags = 0;
     }
-    void* ptr = private_heap->alloc(overalloc, dw_flags);
+    void* ptr = private_heap->alloc(overalloc);
     if(ptr) [[likely]] {
       *((PrivateHeap**)ptr) = private_heap;
       return (void*)(((char*)ptr) + heap_ptr_ofst());
