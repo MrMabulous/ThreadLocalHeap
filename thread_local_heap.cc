@@ -4,6 +4,7 @@ All rights reserved.
 */
 
 #include <windows.h>
+#include <atomic>
 #include <memory>
 #include <new>
 
@@ -59,8 +60,8 @@ class PrivateHeap {
   bool free(void* ptr) {
     bool success = HeapFree(heap_handle_, 0, ptr);
     if (success && is_not_process_heap_) [[likely]] {
-      allocation_count_--;
-      if(marked_for_destruction_ && empty()) [[unlikely]] {
+      size_t new_count = --allocation_count_;
+      if(marked_for_destruction_ && new_count == 0) [[unlikely]] {
         delete this;
       }
     }
@@ -81,7 +82,7 @@ class PrivateHeap {
 
  private:
   // Number of allocations not yet freed.
-  size_t allocation_count_;
+  std::atomic<size_t> allocation_count_;
 
   // Handle to the wrapped Windows heap.
   HANDLE heap_handle_;
