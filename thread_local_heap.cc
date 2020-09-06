@@ -1,3 +1,8 @@
+/*
+Copyright(c) 2020 Matthias Bühlmann, Mabulous GmbH. http://www.mabulous.com
+All rights reserved.
+*/
+
 #include <windows.h>
 #include <memory>
 #include <new>
