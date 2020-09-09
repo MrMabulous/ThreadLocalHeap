@@ -63,10 +63,10 @@ thread_local ThreadLocalHeap thread_local_heap_;
 void* alloc_from_thread_local_heap(size_t count) {
   if(thread_local_heap_.private_heap == NULL) [[unlikely]] {
     thread_local_heap_.private_heap = static_cast<PrivateHeap*>(malloc(sizeof(PrivateHeap)));
+    new (thread_local_heap_.private_heap) PrivateHeap{};
     thread_local_heap_.private_heap->heap_handle = HeapCreate(0, 0, 0);
     thread_local_heap_.private_heap->allocation_count = 0;
     thread_local_heap_.private_heap->marked_for_deletion = false;
-    thread_local_heap_.private_heap->mutex = std::mutex();
   }
   size_t overalloc = count + heap_ptr_ofst();
   void* ptr = HeapAlloc(thread_local_heap_.private_heap->heap_handle, 0, overalloc);
