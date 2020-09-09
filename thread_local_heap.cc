@@ -4,8 +4,8 @@ All rights reserved.
 */
 
 #include <windows.h>
-#include <atomic>
 #include <memory>
+#include <mutex>
 #include <new>
 
 #if !defined(_WIN64) && __STDCPP_DEFAULT_NEW_ALIGNMENT__ > 8
@@ -21,8 +21,9 @@ namespace {
 // when the owning ThreadLocalHeap lifetime has ended AND the contained heap is empty.
 struct PrivateHeap {
   HANDLE heap_handle;
-  std::atomic<size_t> allocation_count;
-  std::atomic<bool> marked_for_deletion;
+  size_t allocation_count;
+  bool marked_for_deletion;
+  std::mutex mutex;
 };
 
 // Returns the number of bytes to allocate to store the pointer from which to free the memory.
@@ -42,6 +43,7 @@ void DestroyPrivateHeap(PrivateHeap* private_heap) {
 struct ThreadLocalHeap {
   ~ThreadLocalHeap() {
     if(private_heap) {
+      const std::lock_guard<std::mutex> lock(private_heap->mutex);
       private_heap->marked_for_deletion = private_heap->allocation_count == 0;
       if(private_heap->marked_for_deletion) {
         DestroyPrivateHeap(private_heap);
@@ -64,7 +66,10 @@ void* alloc_from_thread_local_heap(size_t count) {
   size_t overalloc = count + heap_ptr_ofst();
   void* ptr = HeapAlloc(thread_local_heap_.private_heap->heap_handle, 0, overalloc);
   if(ptr) [[likely]] {
-    thread_local_heap_.private_heap->allocation_count++;
+    {
+      const std::lock_guard<std::mutex> lock(thread_local_heap_.private_heap->mutex);
+      thread_local_heap_.private_heap->allocation_count++;
+    }
     *static_cast<PrivateHeap**>(ptr) = thread_local_heap_.private_heap;
     return static_cast<void*>(static_cast<char*>(ptr) + heap_ptr_ofst());
   }
@@ -76,6 +81,7 @@ bool free_from_thread_local_heap(void* ptr) {
   PrivateHeap* private_heap = *static_cast<PrivateHeap**>(actual_ptr);
   bool success = HeapFree(private_heap->heap_handle, 0, actual_ptr);
   if (success) [[likely]] {
+    const std::lock_guard<std::mutex> lock(private_heap->mutex);
     size_t new_allocation_count = --private_heap->allocation_count;
     if(new_allocation_count == 0 && private_heap->marked_for_deletion) [[unlikely]] {
       DestroyPrivateHeap(private_heap);
