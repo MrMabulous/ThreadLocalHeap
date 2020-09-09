@@ -43,12 +43,12 @@ void DestroyPrivateHeap(PrivateHeap* private_heap) {
 struct ThreadLocalHeap {
   ~ThreadLocalHeap() {
     if(private_heap) {
-	  bool destroy_heap = false;
-	  {
+      bool destroy_heap = false;
+      {
         const std::lock_guard<std::mutex> lock(private_heap->mutex);
         private_heap->marked_for_deletion = private_heap->allocation_count == 0;
-		destroy_heap = private_heap->marked_for_deletion;
-	  }
+        destroy_heap = private_heap->marked_for_deletion;
+      }
       if(destroy_heap) {
         DestroyPrivateHeap(private_heap);
       }
@@ -66,6 +66,7 @@ void* alloc_from_thread_local_heap(size_t count) {
     thread_local_heap_.private_heap->heap_handle = HeapCreate(0, 0, 0);
     thread_local_heap_.private_heap->allocation_count = 0;
     thread_local_heap_.private_heap->marked_for_deletion = false;
+    thread_local_heap_.private_heap->mutex = std::mutex();
   }
   size_t overalloc = count + heap_ptr_ofst();
   void* ptr = HeapAlloc(thread_local_heap_.private_heap->heap_handle, 0, overalloc);
@@ -85,12 +86,12 @@ bool free_from_thread_local_heap(void* ptr) {
   PrivateHeap* private_heap = *static_cast<PrivateHeap**>(actual_ptr);
   bool success = HeapFree(private_heap->heap_handle, 0, actual_ptr);
   if (success) [[likely]] {
-	bool destroy_heap = false;
-	{
+    bool destroy_heap = false;
+    {
       const std::lock_guard<std::mutex> lock(private_heap->mutex);
       size_t new_allocation_count = --private_heap->allocation_count;
-	  destroy_heap = new_allocation_count == 0 && private_heap->marked_for_deletion;
-	}
+      destroy_heap = new_allocation_count == 0 && private_heap->marked_for_deletion;
+    }
     if(destroy_heap) [[unlikely]] {
       DestroyPrivateHeap(private_heap);
     }
